@@ -1,0 +1,145 @@
+#!/usr/bin/env python
+"""
+IAM Configuration Script
+Author: Simon Teague
+Version: 1.0
+Date: 23/10/2020
+
+This script will create the stackexecutionrole within all accounts. Optional account ID for main deployment account coming.
+"""
+
+import boto3
+import sys
+import time
+import argparse
+import re
+import json
+import random
+import string
+import collections
+import csv
+
+from collections import OrderedDict
+from botocore.exceptions import ClientError
+
+def append_new_line(file_name, text_to_append):
+    """Log file generation function"""
+    # Open the file in append & read mode ('a+')
+    with open(file_name, "a+") as file_object:
+        # Move read cursor to the start of file.
+        file_object.seek(0)
+        # If file is not empty then append '\n'
+        data = file_object.read(100)
+        if len(data) > 0:
+            file_object.write("\n")
+        # Append text at the end of file
+        file_object.write(text_to_append)
+
+def assume_role(aws_account_number, role_name):
+    """
+    Assumes the provided role in each account within the input file
+    :param role_name: Role to assume in target account
+    """
+
+    # Beginning the assume role process for account
+    sts_client = boto3.client('sts')
+    
+    # Get the current partition
+    partition = sts_client.get_caller_identity()['Arn'].split(":")[1]
+    
+    response = sts_client.assume_role(
+        RoleArn='arn:{}:iam::{}:role/{}'.format(partition,aws_account_number,role_name),
+        RoleSessionName='OrganizationAccountAccessRole'
+    )
+    
+    # Storing STS credentials
+    session = boto3.Session(
+        aws_access_key_id=response['Credentials']['AccessKeyId'],
+        aws_secret_access_key=response['Credentials']['SecretAccessKey'],
+        aws_session_token=response['Credentials']['SessionToken']
+    )
+
+    print("Assumed session for {}.".format(aws_account_number))
+
+    return session
+
+#Trust_Policy to apply to trust
+trust_policy = {
+    "Version": "2012-10-17",
+    "Statement": [
+                {
+                "Effect": "Allow",
+                "Principal": {
+                    "AWS": "arn:aws:iam::949157539592:root"
+                            },
+                "Action": "sts:AssumeRole"
+                }
+        ]
+}
+
+if __name__ == '__main__':
+    
+    # Setup command line arguments
+    parser = argparse.ArgumentParser(description='AWS Accounts to process')
+    parser.add_argument('input_file', help='Path to CSV file containing the list of account IDs and network options')
+    parser.add_argument('--assume_role', type=str, required=True, help="Role Name to assume in each account")
+    args = parser.parse_args()
+
+# Process through accounts
+with open(args.input_file,'r') as csvfile:
+    reader = csv.reader(csvfile, delimiter=',')
+    for row in reader:
+        append_new_line('stacksetrolelog.txt', 'Starting account Configuration for account {}'.format(row[0]))
+        session = assume_role(row[0], args.assume_role)
+        iam_client = session.client('iam')
+        account_id = row[0]
+
+        try:
+            create_role_res = iam_client.create_role(
+                RoleName='CBStackSetExecutionRole',
+                AssumeRolePolicyDocument=json.dumps(trust_policy),
+                Description='',
+                Tags=[
+                    {
+                    'Key': 'Business Unit',
+                    'Value': 'Enterprise Platform',
+                    'Key': 'Environment',
+                    'Value': 'Shared Services'
+                }
+            ]
+        )
+        except ClientError as error:
+            if error.response['Error']['Code'] == 'EntityAlreadyExists':
+                return 'Role already exists... hence exiting from here'
+            else:
+                return 'Unexpected error occurred... Role could not be created', error
+        
+        policy_code = {
+        "Version": "2012-10-17",
+            "Statement": [{
+                    "Effect": "Allow",
+                    "Action": "*",
+                    "Resource": "*"
+                }
+            ]
+        }
+
+        policy_name = role_name + '_policy'
+        policy_arn = ''
+
+        try:
+            policy_res = iam_client.create_policy(
+                PolicyName=policy_name,
+                PolicyDocument=json.dumps(policy_code)
+                )
+            policy_arn = policy_res['Policy']['Arn']
+        except ClientError as error:
+            if error.response['Error']['Code'] == 'EntityAlreadyExists':
+                print('Policy already exists... hence using the same policy')
+                policy_arn = 'arn:aws:iam::' + account_id + ':policy/' + policy_name
+            else:
+                print('Unexpected error occurred... hence cleaning up', error)
+                iam_client.delete_role(
+                RoleName= role_name
+                )
+            return 'Role could not be created...', error

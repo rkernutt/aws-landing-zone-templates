@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Central log archive S3 bucket for AWS Landing Zone — receives CloudTrail org trail,
+  Config delivery, and VPC Flow Logs from all member accounts.
+  Deploy in the Log Archive account in {{PRIMARY_REGION}}.
+
+Parameters:
+  CustomerCode:
+    Type: String
+    Default: '{{CUSTOMER_CODE}}'
+    Description: Short customer code used as resource prefix
+    AllowedPattern: '^[a-z0-9-]{2,16}$'
+  OrgId:
+    Type: String
+    Description: AWS Organizations ID (e.g. o-abcdef1234) — used in bucket policy
+    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+  LogRetentionYears:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 30
+  TransitionToGlacierDays:
+    Type: Number
+    Default: 365
+  EnableObjectLock:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+Conditions:
+  WithObjectLock: !Equals [!Ref EnableObjectLock, 'true']
+
+Resources:
+  LogsKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'KMS key for ${CustomerCode} central log archive bucket'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRoot
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudTrail
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringLike:
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:*:*:trail/*'
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrgId
+          - Sid: AllowConfigDelivery
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrgId
+          - Sid: AllowVpcFlowLogs
+            Effect: Allow
+            Principal: { Service: delivery.logs.amazonaws.com }
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+            Resource: '*'
+
+  LogsKmsAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${CustomerCode}-log-archive'
+      TargetKeyId: !Ref LogsKmsKey
+
+  LogArchiveBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${CustomerCode}-log-archive-${AWS::AccountId}-${AWS::Region}'
+      ObjectLockEnabled: !If [WithObjectLock, true, !Ref AWS::NoValue]
+      ObjectLockConfiguration:
+        !If
+          - WithObjectLock
+          - ObjectLockEnabled: Enabled
+            Rule:
+              DefaultRetention:
+                Mode: COMPLIANCE
+                Years: !Ref LogRetentionYears
+          - !Ref AWS::NoValue
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt LogsKmsKey.Arn
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionAndExpire
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: !Ref TransitionToGlacierDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 365
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  LogArchiveBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogArchiveBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:aws:s3:::${LogArchiveBucket}'
+              - !Sub 'arn:aws:s3:::${LogArchiveBucket}/*'
+            Condition:
+              Bool: { 'aws:SecureTransport': 'false' }
+          - Sid: AllowCloudTrailAclCheck
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: 's3:GetBucketAcl'
+            Resource: !Sub 'arn:aws:s3:::${LogArchiveBucket}'
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrgId
+          - Sid: AllowCloudTrailWrite
+            Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:aws:s3:::${LogArchiveBucket}/AWSLogs/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+                'aws:SourceOrgID': !Ref OrgId
+          - Sid: AllowConfigDelivery
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:aws:s3:::${LogArchiveBucket}/AWSLogs/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+                'aws:SourceOrgID': !Ref OrgId
+          - Sid: AllowConfigBucketAcl
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: 's3:GetBucketAcl'
+            Resource: !Sub 'arn:aws:s3:::${LogArchiveBucket}'
+            Condition:
+              StringEquals:
+                'aws:SourceOrgID': !Ref OrgId
+
+Outputs:
+  BucketName:
+    Value: !Ref LogArchiveBucket
+    Export: { Name: !Sub '${CustomerCode}-log-archive-bucket' }
+  KmsKeyArn:
+    Value: !GetAtt LogsKmsKey.Arn
+    Export: { Name: !Sub '${CustomerCode}-log-archive-kms-arn' }

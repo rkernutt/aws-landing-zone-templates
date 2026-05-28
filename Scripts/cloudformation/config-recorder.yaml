@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Per-account AWS Config recorder and delivery channel.
+  Deploy as a CloudFormation StackSet from the Audit (delegated admin) account
+  to all accounts in the Organisation, including the management account.
+
+Parameters:
+  CustomerCode:
+    Type: String
+    Default: '{{CUSTOMER_CODE}}'
+    AllowedPattern: '^[a-z0-9-]{2,16}$'
+  LogArchiveBucketName:
+    Type: String
+    Description: Central log archive bucket name (in the Log Archive account)
+  IncludeGlobalResources:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Set to true ONLY in the home region of each account to avoid duplicate global recordings.
+
+Conditions:
+  RecordGlobalResources: !Equals [!Ref IncludeGlobalResources, 'true']
+
+Resources:
+  ConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${CustomerCode}-config-recorder-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Properties:
+      Name: !Sub '${CustomerCode}-recorder'
+      RoleARN: !GetAtt ConfigRole.Arn
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResourceTypes: !If [RecordGlobalResources, true, false]
+      RecordingMode:
+        RecordingFrequency: CONTINUOUS
+
+  DeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    Properties:
+      Name: !Sub '${CustomerCode}-delivery'
+      S3BucketName: !Ref LogArchiveBucketName
+      S3KeyPrefix: !Sub 'AWSLogs/${AWS::AccountId}/Config'
+      ConfigSnapshotDeliveryProperties:
+        DeliveryFrequency: One_Hour

@@ -1,0 +1,42 @@
+# Office lock and temp files
+.~lock.*
+~$*
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+
+# Node / builder tooling
+node_modules/
+package-lock.json
+
+# Build artefacts
+*.pdf
+build/
+dist/
+
+# Local secrets — never commit
+*.env
+.env*
+secrets.*
+credentials.*
+*.pem
+*.key
+*.pfx
+
+# Editor
+.vscode/
+.idea/
+*.swp

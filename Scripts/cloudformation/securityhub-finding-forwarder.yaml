@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  EventBridge rule that forwards Security Hub high/critical findings to an SNS topic
+  for downstream consumption (email, ticketing, SIEM). Deploy in the Audit account
+  in the finding aggregation region.
+
+Parameters:
+  CustomerCode:
+    Type: String
+    Default: '{{CUSTOMER_CODE}}'
+    AllowedPattern: '^[a-z0-9-]{2,16}$'
+  NotificationEmail:
+    Type: String
+    Description: Subscribed email for high/critical findings
+    AllowedPattern: '^[^@]+@[^@]+\.[^@]+$'
+  SeverityLabels:
+    Type: CommaDelimitedList
+    Default: 'HIGH,CRITICAL'
+    Description: Severity levels to forward
+
+Resources:
+  FindingsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${CustomerCode}-securityhub-findings'
+      DisplayName: Security Hub findings
+      KmsMasterKeyId: alias/aws/sns
+
+  EmailSub:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+      TopicArn: !Ref FindingsTopic
+
+  TopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref FindingsTopic]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridge
+            Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: 'sns:Publish'
+            Resource: !Ref FindingsTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+  Rule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${CustomerCode}-securityhub-high-critical'
+      Description: Forward high/critical Security Hub findings to SNS
+      EventPattern:
+        source: ['aws.securityhub']
+        detail-type: ['Security Hub Findings - Imported']
+        detail:
+          findings:
+            Severity:
+              Label: !Ref SeverityLabels
+            Workflow:
+              Status: ['NEW']
+            RecordState: ['ACTIVE']
+      State: ENABLED
+      Targets:
+        - Id: SnsTopic
+          Arn: !Ref FindingsTopic
+          InputPath: '$.detail.findings[0]'
+
+Outputs:
+  TopicArn:
+    Value: !Ref FindingsTopic
