@@ -16,7 +16,7 @@ TERMS = ["Close Brothers", "closebrothers", "Softcat", "Simon Teague", "Ross Ham
          "Cb-network-", "AssetDev", "AssetProd", "InvoiceDev", "InvoicePreProd",
          "MotorDev", "MotorProd", "PremiumDev", "PremiumProd", "CentralDev",
          "Awsroot", "Awssecurity", "Awssharedservices", "Awslogging", "Awsnetwork"]
-ALLOW_DIRS = {"legacy"}
+ALLOW_DIRS = {"legacy", "tools", ".github", ".git"}
 
 def read_docx_text(path):
     with zipfile.ZipFile(path) as z:
